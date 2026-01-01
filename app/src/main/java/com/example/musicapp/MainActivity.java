@@ -15,8 +15,12 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -25,9 +29,17 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtStatus;
     private Button btnPlayPause;
 
+    private RecyclerView rvQueue;
+    private RecyclerView rvLibrary;
+
+    private final List<String> queueItems = new ArrayList<>();
+    private QueueAdapter queueAdapter;
+
+    private final List<Song> librarySongs = new ArrayList<>();
+    private SongsAdapter songsAdapter;
+
     private MediaPlayer mediaPlayer;
-    private Uri firstTrackUri;
-    private String firstTrackName;
+    private Song currentSong;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,8 +48,22 @@ public class MainActivity extends AppCompatActivity {
 
         txtStatus = findViewById(R.id.txtStatus);
         btnPlayPause = findViewById(R.id.btnPlayPause);
+        rvQueue = findViewById(R.id.rvQueue);
+        rvLibrary = findViewById(R.id.rvLibrary);
+
+        // RecyclerViews setup
+        rvQueue.setLayoutManager(new LinearLayoutManager(this));
+        queueAdapter = new QueueAdapter(queueItems);
+        rvQueue.setAdapter(queueAdapter);
+
+        rvLibrary.setLayoutManager(new LinearLayoutManager(this));
+        songsAdapter = new SongsAdapter(librarySongs, song -> {
+            loadSong(song);
+        });
+        rvLibrary.setAdapter(songsAdapter);
 
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
+        btnPlayPause.setEnabled(false);
 
         requestAudioPermissionIfNeeded();
     }
@@ -48,21 +74,23 @@ public class MainActivity extends AppCompatActivity {
                 : Manifest.permission.READ_EXTERNAL_STORAGE;
 
         if (ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED) {
-            loadFirstTrack();
+            loadLibrary();
         } else {
             ActivityCompat.requestPermissions(this, new String[]{perm}, REQ_AUDIO_PERMISSION);
         }
     }
 
-    private void loadFirstTrack() {
-        // Query MediaStore for music files, alphabetical by display name
+    private void loadLibrary() {
+        librarySongs.clear();
+
         String[] projection = {
                 MediaStore.Audio.Media._ID,
-                MediaStore.Audio.Media.DISPLAY_NAME
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.DATE_ADDED
         };
 
         String selection = MediaStore.Audio.Media.IS_MUSIC + " != 0";
-        String sortOrder = MediaStore.Audio.Media.DISPLAY_NAME + " ASC";
+        String sortOrder = MediaStore.Audio.Media.DATE_ADDED + " DESC";
 
         try (Cursor cursor = getContentResolver().query(
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
@@ -72,25 +100,55 @@ public class MainActivity extends AppCompatActivity {
                 sortOrder
         )) {
             if (cursor == null || !cursor.moveToFirst()) {
-                txtStatus.setText("No music found. Put an MP3 in Internal storage > Music.");
+                txtStatus.setText("No music found. Put an MP3 in Music and make sure MediaStore sees it.");
                 btnPlayPause.setEnabled(false);
+                songsAdapter.notifyDataSetChanged();
+
+                queueItems.clear();
+                queueAdapter.notifyDataSetChanged();
                 return;
             }
 
             int idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
             int nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME);
+            int dateCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED);
 
-            long id = cursor.getLong(idCol);
-            firstTrackName = cursor.getString(nameCol);
-            firstTrackUri = Uri.withAppendedPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, String.valueOf(id));
+            do {
+                long id = cursor.getLong(idCol);
+                String name = cursor.getString(nameCol);
+                long dateAdded = cursor.getLong(dateCol);
 
-            txtStatus.setText("Loaded: " + firstTrackName);
-            btnPlayPause.setEnabled(true);
+                Uri uri = Uri.withAppendedPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                librarySongs.add(new Song(uri, name, dateAdded));
+            } while (cursor.moveToNext());
 
-            preparePlayer(firstTrackUri);
+            songsAdapter.notifyDataSetChanged();
+
+            // Default: play newest (first item)
+            loadSong(librarySongs.get(0));
 
         } catch (Exception e) {
-            txtStatus.setText("Error loading music: " + e.getMessage());
+            txtStatus.setText("Error loading library: " + e.getMessage());
+            btnPlayPause.setEnabled(false);
+        }
+    }
+
+    private void loadSong(Song song) {
+        currentSong = song;
+
+        txtStatus.setText("Loaded: " + song.name);
+        btnPlayPause.setEnabled(true);
+        btnPlayPause.setText("Play");
+
+        // Queue: for now, only currently loaded song
+        queueItems.clear();
+        queueItems.add(song.name);
+        queueAdapter.notifyDataSetChanged();
+
+        try {
+            preparePlayer(song.uri);
+        } catch (IOException e) {
+            txtStatus.setText("Error preparing player: " + e.getMessage());
             btnPlayPause.setEnabled(false);
         }
     }
@@ -100,13 +158,13 @@ public class MainActivity extends AppCompatActivity {
 
         mediaPlayer = new MediaPlayer();
         mediaPlayer.setDataSource(this, uri);
+
         mediaPlayer.setOnPreparedListener(mp -> {
-            // Ready to play
+            // Ready
         });
-        mediaPlayer.setOnCompletionListener(mp -> {
-            // Reset to "Play" when track ends
-            btnPlayPause.setText("Play");
-        });
+
+        mediaPlayer.setOnCompletionListener(mp -> btnPlayPause.setText("Play"));
+
         mediaPlayer.prepareAsync();
     }
 
@@ -141,7 +199,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (requestCode == REQ_AUDIO_PERMISSION) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                loadFirstTrack();
+                loadLibrary();
             } else {
                 txtStatus.setText("Permission denied. Can't read music files.");
                 btnPlayPause.setEnabled(false);
