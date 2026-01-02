@@ -85,33 +85,35 @@ public class MainActivity extends AppCompatActivity {
     private void setupDragAndDrop() {
         View root = findViewById(R.id.main);
 
-        // If a QUEUE drag ends and no drop target handled it => remove (unless first item)
+        // Root listens so we can detect "dropped outside the queue"
         root.setOnDragListener((v, event) -> {
-            if (event.getAction() == DragEvent.ACTION_DRAG_STARTED) return true;
+            Object ls = event.getLocalState();
+            if (!(ls instanceof DragData)) return true;
+            DragData d = (DragData) ls;
 
-            if (event.getAction() == DragEvent.ACTION_DRAG_ENDED) {
-                Object ls = event.getLocalState();
-                if (ls instanceof DragData) {
-                    DragData d = (DragData) ls;
+            switch (event.getAction()) {
+                case DragEvent.ACTION_DRAG_STARTED:
+                    return true;
 
-                    // Dropped nowhere (result=false) => "outside region"
-                    if (!event.getResult()
-                            && DragData.SOURCE_QUEUE.equals(d.source)
-                            && d.position > 0
-                            && d.position < queueSongs.size()) {
-
-                        queueSongs.remove(d.position);
-                        queueAdapter.notifyItemRemoved(d.position);
+                case DragEvent.ACTION_DROP:
+                    // If dragging FROM queue and dropped OUTSIDE rvQueue -> remove (except first item)
+                    if (DragData.SOURCE_QUEUE.equals(d.source) && d.position > 0) {
+                        if (!isDropInsideView(rvQueue, v, event)) {
+                            if (d.position < queueSongs.size()) {
+                                queueSongs.remove(d.position);
+                                queueAdapter.notifyItemRemoved(d.position);
+                            }
+                            return true; // we handled the drop
+                        }
                     }
-                }
-                return true;
+                    return false; // let rvQueue handle drops inside it
+
+                case DragEvent.ACTION_DRAG_ENDED:
+                    return true;
             }
             return true;
         });
 
-        // Queue accepts drops:
-        // - from LIB: add to queue
-        // - from QUEUE: reorder (cannot move slot 0)
         rvQueue.setOnDragListener((v, event) -> {
             Object ls = event.getLocalState();
             if (!(ls instanceof DragData)) return false;
@@ -125,7 +127,7 @@ public class MainActivity extends AppCompatActivity {
                     int targetPos = getDropPositionInQueue(event.getX(), event.getY());
 
                     if (DragData.SOURCE_LIBRARY.equals(d.source)) {
-                        // insert AFTER currently playing (index 0). If queue empty, insert at 0.
+                        // insert AFTER currently playing (index 0). If queue is empty, insert at 0.
                         int insertPos = queueSongs.isEmpty() ? 0 : Math.max(1, targetPos);
                         if (insertPos > queueSongs.size()) insertPos = queueSongs.size();
 
@@ -156,6 +158,26 @@ public class MainActivity extends AppCompatActivity {
             }
         });
     }
+
+    private boolean isDropInsideView(View targetView, View rootView, DragEvent event) {
+        int[] rootLoc = new int[2];
+        rootView.getLocationOnScreen(rootLoc);
+
+        float rawX = event.getX() + rootLoc[0];
+        float rawY = event.getY() + rootLoc[1];
+
+        int[] targetLoc = new int[2];
+        targetView.getLocationOnScreen(targetLoc);
+
+        float left = targetLoc[0];
+        float top = targetLoc[1];
+        float right = left + targetView.getWidth();
+        float bottom = top + targetView.getHeight();
+
+        return rawX >= left && rawX <= right && rawY >= top && rawY <= bottom;
+    }
+
+
 
     private int getDropPositionInQueue(float x, float y) {
         View child = rvQueue.findChildViewUnder(x, y);
