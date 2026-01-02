@@ -1,5 +1,6 @@
 package com.example.musicapp;
 
+import android.content.ClipData;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -12,9 +13,9 @@ import java.util.List;
 
 public class QueueAdapter extends RecyclerView.Adapter<QueueAdapter.VH> {
 
-    private final List<String> items;
+    private final List<Song> items;
 
-    public QueueAdapter(List<String> items) {
+    public QueueAdapter(List<Song> items) {
         this.items = items;
     }
 
@@ -27,7 +28,26 @@ public class QueueAdapter extends RecyclerView.Adapter<QueueAdapter.VH> {
 
     @Override
     public void onBindViewHolder(@NonNull VH holder, int position) {
-        holder.txt.setText(items.get(position));
+        Song s = items.get(position);
+        holder.txt.setText(s.name);
+
+        // First item = currently playing -> cannot be dragged/removed
+        if (position == 0) {
+            holder.itemView.setOnLongClickListener(null);
+        } else {
+            holder.itemView.setOnLongClickListener(v -> {
+                int pos = holder.getBindingAdapterPosition();
+                if (pos == RecyclerView.NO_POSITION) return false;
+
+                Song song = items.get(pos);
+                DragData dragData = new DragData(DragData.SOURCE_QUEUE, pos, song);
+
+                ClipData clip = ClipData.newPlainText("queue_song", song.name);
+                View.DragShadowBuilder shadow = new View.DragShadowBuilder(v);
+                v.startDragAndDrop(clip, shadow, dragData, 0);
+                return true;
+            });
+        }
     }
 
     @Override

@@ -1,4 +1,3 @@
-// app/src/main/java/com/example/musicapp/Song.java
 package com.example.musicapp;
 
 import android.net.Uri;

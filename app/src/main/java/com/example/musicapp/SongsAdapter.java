@@ -1,5 +1,6 @@
 package com.example.musicapp;
 
+import android.content.ClipData;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -8,11 +9,10 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
-import java.util.List;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
-
 
 public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
     private final SimpleDateFormat dateFmt = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
@@ -41,21 +41,30 @@ public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
         Song s = songs.get(position);
 
         holder.txtSongName.setText(s.name);
+        holder.txtSongDate.setText(dateFmt.format(new Date(s.dateAddedMillis)));
 
-        if (s.dateAddedMillis > 0) {
-            holder.txtSongDate.setText(dateFmt.format(new Date(s.dateAddedMillis)));
-        } else {
-            holder.txtSongDate.setText("");
-        }
-
+        // Click -> play
         holder.itemView.setOnClickListener(v -> {
             int pos = holder.getBindingAdapterPosition();
-            if (pos != RecyclerView.NO_POSITION && listener != null) {
+            if (pos != RecyclerView.NO_POSITION) {
                 listener.onSongClick(pos, songs.get(pos));
             }
         });
-    }
 
+        // Long press -> drag to queue
+        holder.itemView.setOnLongClickListener(v -> {
+            int pos = holder.getBindingAdapterPosition();
+            if (pos == RecyclerView.NO_POSITION) return false;
+
+            Song song = songs.get(pos);
+            DragData dragData = new DragData(DragData.SOURCE_LIBRARY, pos, song);
+
+            ClipData clip = ClipData.newPlainText("song", song.name);
+            View.DragShadowBuilder shadow = new View.DragShadowBuilder(v);
+            v.startDragAndDrop(clip, shadow, dragData, 0);
+            return true;
+        });
+    }
 
     @Override
     public int getItemCount() {
