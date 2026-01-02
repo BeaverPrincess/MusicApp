@@ -9,8 +9,13 @@ import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.List;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+
 
 public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
+    private final SimpleDateFormat dateFmt = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
 
     public interface OnSongClickListener {
         void onSongClick(int position, Song song);
@@ -34,12 +39,23 @@ public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
     @Override
     public void onBindViewHolder(@NonNull VH holder, int position) {
         Song s = songs.get(position);
-        holder.txt.setText(s.name);
+
+        holder.txtSongName.setText(s.name);
+
+        if (s.dateAddedMillis > 0) {
+            holder.txtSongDate.setText(dateFmt.format(new Date(s.dateAddedMillis)));
+        } else {
+            holder.txtSongDate.setText("");
+        }
 
         holder.itemView.setOnClickListener(v -> {
-            if (listener != null) listener.onSongClick(holder.getAdapterPosition(), s);
+            int pos = holder.getBindingAdapterPosition();
+            if (pos != RecyclerView.NO_POSITION && listener != null) {
+                listener.onSongClick(pos, songs.get(pos));
+            }
         });
     }
+
 
     @Override
     public int getItemCount() {
@@ -47,10 +63,12 @@ public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
     }
 
     static class VH extends RecyclerView.ViewHolder {
-        TextView txt;
-        VH(@NonNull View itemView) {
+        TextView txtSongName, txtSongDate;
+
+        public VH(View itemView) {
             super(itemView);
-            txt = itemView.findViewById(R.id.txtSongItem);
+            txtSongName = itemView.findViewById(R.id.txtSongName);
+            txtSongDate = itemView.findViewById(R.id.txtSongDate);
         }
     }
 }

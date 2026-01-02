@@ -92,7 +92,8 @@ public class MainActivity extends AppCompatActivity {
 
         String[] projection = {
                 MediaStore.Audio.Media._ID,
-                MediaStore.Audio.Media.DISPLAY_NAME
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.DATE_ADDED
         };
 
         String selection = MediaStore.Audio.Media.IS_MUSIC + " != 0";
@@ -108,8 +109,6 @@ public class MainActivity extends AppCompatActivity {
             if (cursor == null || !cursor.moveToFirst()) {
                 txtStatus.setText("No music found. Put an MP3 in Internal storage > Music.");
                 setControlsEnabled(false);
-
-                // update UI lists
                 songsAdapter.notifyDataSetChanged();
                 setQueueToCurrent();
                 return;
@@ -117,39 +116,40 @@ public class MainActivity extends AppCompatActivity {
 
             int idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
             int nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME);
+            int dateCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED);
 
             do {
                 long id = cursor.getLong(idCol);
                 String name = cursor.getString(nameCol);
+
+                long dateAddedSeconds = cursor.getLong(dateCol);
+                long dateAddedMillis = dateAddedSeconds * 1000L;
+
                 Uri uri = Uri.withAppendedPath(
                         MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
                         String.valueOf(id)
                 );
-                librarySongs.add(new Song(id, name, uri));
+
+                librarySongs.add(new Song(id, name, uri, dateAddedMillis));
             } while (cursor.moveToNext());
 
-            // tell RecyclerView data changed
             songsAdapter.notifyDataSetChanged();
 
-            // Default: newest first
             currentIndex = 0;
             txtStatus.setText("Loaded: " + librarySongs.get(currentIndex).name);
             setControlsEnabled(true);
 
-            // queue shows currently loaded track
             setQueueToCurrent();
-
-            // Prepare (don’t autoplay)
             preparePlayer(librarySongs.get(currentIndex).uri, false);
 
         } catch (Exception e) {
             txtStatus.setText("Error loading music: " + e.getMessage());
             setControlsEnabled(false);
-
             songsAdapter.notifyDataSetChanged();
             setQueueToCurrent();
         }
     }
+
 
     private void setQueueToCurrent() {
         queueItems.clear();
