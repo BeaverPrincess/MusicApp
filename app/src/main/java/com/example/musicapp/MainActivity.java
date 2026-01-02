@@ -20,26 +20,27 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQ_AUDIO_PERMISSION = 1001;
 
     private TextView txtStatus;
-    private Button btnPlayPause;
+    private Button btnPrev, btnPlayPause, btnNext;
 
-    private RecyclerView rvQueue;
-    private RecyclerView rvLibrary;
-
-    private final List<String> queueItems = new ArrayList<>();
+    private RecyclerView rvQueue, rvLibrary;
     private QueueAdapter queueAdapter;
-
-    private final List<Song> librarySongs = new ArrayList<>();
     private SongsAdapter songsAdapter;
 
+    private final ArrayList<String> queueItems = new ArrayList<>();
+    private final ArrayList<Song> librarySongs = new ArrayList<>();
+    private int currentIndex = -1;
+
     private MediaPlayer mediaPlayer;
-    private Song currentSong;
+    private boolean isPrepared = false;
+
+    // For now: queue is just "currently playing"
+    private boolean usingSingleItemQueue = true;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -47,23 +48,29 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         txtStatus = findViewById(R.id.txtStatus);
+        btnPrev = findViewById(R.id.btnPrev);
         btnPlayPause = findViewById(R.id.btnPlayPause);
+        btnNext = findViewById(R.id.btnNext);
+
         rvQueue = findViewById(R.id.rvQueue);
         rvLibrary = findViewById(R.id.rvLibrary);
 
-        // RecyclerViews setup
+        // --- RecyclerViews setup ---
         rvQueue.setLayoutManager(new LinearLayoutManager(this));
         queueAdapter = new QueueAdapter(queueItems);
         rvQueue.setAdapter(queueAdapter);
 
         rvLibrary.setLayoutManager(new LinearLayoutManager(this));
-        songsAdapter = new SongsAdapter(librarySongs, song -> {
-            loadSong(song);
+        songsAdapter = new SongsAdapter(librarySongs, (position, song) -> {
+            currentIndex = position;
+            playAtIndex(currentIndex, true);
         });
         rvLibrary.setAdapter(songsAdapter);
+        // --------------------------
 
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
-        btnPlayPause.setEnabled(false);
+        btnPrev.setOnClickListener(v -> playPrevious());
+        btnNext.setOnClickListener(v -> playNext());
 
         requestAudioPermissionIfNeeded();
     }
@@ -74,19 +81,18 @@ public class MainActivity extends AppCompatActivity {
                 : Manifest.permission.READ_EXTERNAL_STORAGE;
 
         if (ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED) {
-            loadLibrary();
+            loadLibraryNewestFirst();
         } else {
             ActivityCompat.requestPermissions(this, new String[]{perm}, REQ_AUDIO_PERMISSION);
         }
     }
 
-    private void loadLibrary() {
+    private void loadLibraryNewestFirst() {
         librarySongs.clear();
 
         String[] projection = {
                 MediaStore.Audio.Media._ID,
-                MediaStore.Audio.Media.DISPLAY_NAME,
-                MediaStore.Audio.Media.DATE_ADDED
+                MediaStore.Audio.Media.DISPLAY_NAME
         };
 
         String selection = MediaStore.Audio.Media.IS_MUSIC + " != 0";
@@ -100,76 +106,85 @@ public class MainActivity extends AppCompatActivity {
                 sortOrder
         )) {
             if (cursor == null || !cursor.moveToFirst()) {
-                txtStatus.setText("No music found. Put an MP3 in Music and make sure MediaStore sees it.");
-                btnPlayPause.setEnabled(false);
-                songsAdapter.notifyDataSetChanged();
+                txtStatus.setText("No music found. Put an MP3 in Internal storage > Music.");
+                setControlsEnabled(false);
 
-                queueItems.clear();
-                queueAdapter.notifyDataSetChanged();
+                // update UI lists
+                songsAdapter.notifyDataSetChanged();
+                setQueueToCurrent();
                 return;
             }
 
             int idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
             int nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME);
-            int dateCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED);
 
             do {
                 long id = cursor.getLong(idCol);
                 String name = cursor.getString(nameCol);
-                long dateAdded = cursor.getLong(dateCol);
-
-                Uri uri = Uri.withAppendedPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, String.valueOf(id));
-                librarySongs.add(new Song(uri, name, dateAdded));
+                Uri uri = Uri.withAppendedPath(
+                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                        String.valueOf(id)
+                );
+                librarySongs.add(new Song(id, name, uri));
             } while (cursor.moveToNext());
 
+            // tell RecyclerView data changed
             songsAdapter.notifyDataSetChanged();
 
-            // Default: play newest (first item)
-            loadSong(librarySongs.get(0));
+            // Default: newest first
+            currentIndex = 0;
+            txtStatus.setText("Loaded: " + librarySongs.get(currentIndex).name);
+            setControlsEnabled(true);
+
+            // queue shows currently loaded track
+            setQueueToCurrent();
+
+            // Prepare (don’t autoplay)
+            preparePlayer(librarySongs.get(currentIndex).uri, false);
 
         } catch (Exception e) {
-            txtStatus.setText("Error loading library: " + e.getMessage());
-            btnPlayPause.setEnabled(false);
+            txtStatus.setText("Error loading music: " + e.getMessage());
+            setControlsEnabled(false);
+
+            songsAdapter.notifyDataSetChanged();
+            setQueueToCurrent();
         }
     }
 
-    private void loadSong(Song song) {
-        currentSong = song;
-
-        txtStatus.setText("Loaded: " + song.name);
-        btnPlayPause.setEnabled(true);
-        btnPlayPause.setText("Play");
-
-        // Queue: for now, only currently loaded song
+    private void setQueueToCurrent() {
         queueItems.clear();
-        queueItems.add(song.name);
-        queueAdapter.notifyDataSetChanged();
-
-        try {
-            preparePlayer(song.uri);
-        } catch (IOException e) {
-            txtStatus.setText("Error preparing player: " + e.getMessage());
-            btnPlayPause.setEnabled(false);
+        if (currentIndex >= 0 && currentIndex < librarySongs.size()) {
+            queueItems.add(librarySongs.get(currentIndex).name);
         }
+        if (queueAdapter != null) queueAdapter.notifyDataSetChanged();
     }
 
-    private void preparePlayer(Uri uri) throws IOException {
+    private void setControlsEnabled(boolean enabled) {
+        btnPlayPause.setEnabled(enabled);
+        btnPrev.setEnabled(enabled);
+        btnNext.setEnabled(enabled);
+    }
+
+    private void preparePlayer(Uri uri, boolean autoPlay) throws IOException {
         releasePlayer();
 
         mediaPlayer = new MediaPlayer();
+        isPrepared = false;
+
         mediaPlayer.setDataSource(this, uri);
-
         mediaPlayer.setOnPreparedListener(mp -> {
-            // Ready
+            isPrepared = true;
+            if (autoPlay) {
+                mp.start();
+                btnPlayPause.setText("Pause");
+            }
         });
-
         mediaPlayer.setOnCompletionListener(mp -> btnPlayPause.setText("Play"));
-
         mediaPlayer.prepareAsync();
     }
 
     private void togglePlayPause() {
-        if (mediaPlayer == null) return;
+        if (mediaPlayer == null || !isPrepared) return;
 
         if (mediaPlayer.isPlaying()) {
             mediaPlayer.pause();
@@ -180,11 +195,47 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void playNext() {
+        if (librarySongs.isEmpty()) return;
+
+        if (usingSingleItemQueue) {
+            currentIndex = (currentIndex + 1) % librarySongs.size();
+            playAtIndex(currentIndex, true);
+        }
+    }
+
+    private void playPrevious() {
+        if (librarySongs.isEmpty()) return;
+
+        if (usingSingleItemQueue) {
+            currentIndex = (currentIndex - 1 + librarySongs.size()) % librarySongs.size();
+            playAtIndex(currentIndex, true);
+        }
+    }
+
+    private void playAtIndex(int index, boolean autoPlay) {
+        if (index < 0 || index >= librarySongs.size()) return;
+
+        Song s = librarySongs.get(index);
+        txtStatus.setText("Loaded: " + s.name);
+        btnPlayPause.setText("Play");
+
+        // update queue display
+        setQueueToCurrent();
+
+        try {
+            preparePlayer(s.uri, autoPlay);
+        } catch (IOException e) {
+            txtStatus.setText("Error playing: " + e.getMessage());
+        }
+    }
+
     private void releasePlayer() {
         if (mediaPlayer != null) {
             mediaPlayer.release();
             mediaPlayer = null;
         }
+        isPrepared = false;
     }
 
     @Override
@@ -199,10 +250,10 @@ public class MainActivity extends AppCompatActivity {
 
         if (requestCode == REQ_AUDIO_PERMISSION) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                loadLibrary();
+                loadLibraryNewestFirst();
             } else {
                 txtStatus.setText("Permission denied. Can't read music files.");
-                btnPlayPause.setEnabled(false);
+                setControlsEnabled(false);
             }
         }
     }

@@ -3,13 +3,13 @@ package com.example.musicapp;
 import android.net.Uri;
 
 public class Song {
-    public final Uri uri;
+    public final long id;
     public final String name;
-    public final long dateAdded;
+    public final Uri uri;
 
-    public Song(Uri uri, String name, long dateAdded) {
-        this.uri = uri;
+    public Song(long id, String name, Uri uri) {
+        this.id = id;
         this.name = name;
-        this.dateAdded = dateAdded;
+        this.uri = uri;
     }
 }
