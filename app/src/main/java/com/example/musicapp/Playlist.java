@@ -3,7 +3,7 @@ package com.example.musicapp;
 public class Playlist {
     public final long id;
     public final String name;
-    public final int songCount;
+    public int songCount;
 
     public Playlist(long id, String name, int songCount) {
         this.id = id;

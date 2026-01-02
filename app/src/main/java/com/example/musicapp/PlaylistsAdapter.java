@@ -37,18 +37,16 @@ public class PlaylistsAdapter extends RecyclerView.Adapter<PlaylistsAdapter.VH> 
 
         holder.txtSongName.setText(p.name);
 
-        // Reuse the date field to show count (for now)
         holder.txtSongDate.setVisibility(View.VISIBLE);
         holder.txtSongDate.setText(p.songCount + " songs");
 
         holder.itemView.setOnClickListener(v -> {
             int pos = holder.getBindingAdapterPosition();
-            if (pos != RecyclerView.NO_POSITION) {
+            if (pos != RecyclerView.NO_POSITION && listener != null) {
                 listener.onPlaylistClick(pos, playlists.get(pos));
             }
         });
 
-        // No drag/drop for playlists yet
         holder.itemView.setOnLongClickListener(null);
     }
 

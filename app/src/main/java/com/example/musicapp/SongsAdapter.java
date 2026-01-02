@@ -1,6 +1,5 @@
 package com.example.musicapp;
 
-import android.content.ClipData;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -15,18 +14,27 @@ import java.util.List;
 import java.util.Locale;
 
 public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
+
     private final SimpleDateFormat dateFmt = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
 
     public interface OnSongClickListener {
         void onSongClick(int position, Song song);
     }
 
-    private final List<Song> songs;
-    private final OnSongClickListener listener;
+    public interface OnSongLongPressListener {
+        void onSongLongPress(Song song);
+    }
 
-    public SongsAdapter(List<Song> songs, OnSongClickListener listener) {
+    private final List<Song> songs;
+    private final OnSongClickListener clickListener;
+    private final OnSongLongPressListener longPressListener;
+
+    public SongsAdapter(List<Song> songs,
+                        OnSongClickListener clickListener,
+                        OnSongLongPressListener longPressListener) {
         this.songs = songs;
-        this.listener = listener;
+        this.clickListener = clickListener;
+        this.longPressListener = longPressListener;
     }
 
     @NonNull
@@ -47,23 +55,21 @@ public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
         // Click -> play
         holder.itemView.setOnClickListener(v -> {
             int pos = holder.getBindingAdapterPosition();
-            if (pos != RecyclerView.NO_POSITION) {
-                listener.onSongClick(pos, songs.get(pos));
+            if (pos != RecyclerView.NO_POSITION && clickListener != null) {
+                clickListener.onSongClick(pos, songs.get(pos));
             }
         });
 
-        // Long press -> drag to queue
+        // Long press -> show options (Add to queue / Add to playlist)
         holder.itemView.setOnLongClickListener(v -> {
             int pos = holder.getBindingAdapterPosition();
             if (pos == RecyclerView.NO_POSITION) return false;
 
-            Song song = songs.get(pos);
-            DragData dragData = new DragData(DragData.SOURCE_LIBRARY, pos, song);
-
-            ClipData clip = ClipData.newPlainText("song", song.name);
-            View.DragShadowBuilder shadow = new View.DragShadowBuilder(v);
-            v.startDragAndDrop(clip, shadow, dragData, 0);
-            return true;
+            if (longPressListener != null) {
+                longPressListener.onSongLongPress(songs.get(pos));
+                return true; // consume
+            }
+            return false;
         });
     }
 
