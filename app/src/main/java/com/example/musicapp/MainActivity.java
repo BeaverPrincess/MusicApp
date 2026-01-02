@@ -22,6 +22,8 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -41,6 +43,14 @@ public class MainActivity extends AppCompatActivity {
 
     private MediaPlayer mediaPlayer;
     private boolean isPrepared = false;
+    private RadioGroup rgLibraryMode;
+    private RadioButton rbSongs, rbPlaylists;
+
+    private PlaylistsAdapter playlistsAdapter;
+    private final ArrayList<Playlist> playlists = new ArrayList<>();
+
+    private enum LibraryMode { SONGS, PLAYLISTS }
+    private LibraryMode libraryMode = LibraryMode.SONGS;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,6 +67,9 @@ public class MainActivity extends AppCompatActivity {
 
         // Queue RV
         rvQueue.setLayoutManager(new LinearLayoutManager(this));
+        rgLibraryMode = findViewById(R.id.rgLibraryMode);
+        rbSongs = findViewById(R.id.rbSongs);
+        rbPlaylists = findViewById(R.id.rbPlaylists);
         queueAdapter = new QueueAdapter(queueSongs);
         rvQueue.setAdapter(queueAdapter);
 
@@ -73,6 +86,21 @@ public class MainActivity extends AppCompatActivity {
             playSong(song, true); // no try/catch needed now
         });
         rvLibrary.setAdapter(songsAdapter);
+
+        playlistsAdapter = new PlaylistsAdapter(playlists, (position, playlist) -> {
+            txtStatus.setText("Playlist feature coming soon: " + playlist.name);
+        });
+
+        // Default mode
+        setLibraryMode(LibraryMode.SONGS);
+
+        rgLibraryMode.setOnCheckedChangeListener((group, checkedId) -> {
+            if (checkedId == R.id.rbSongs) {
+                setLibraryMode(LibraryMode.SONGS);
+            } else if (checkedId == R.id.rbPlaylists) {
+                setLibraryMode(LibraryMode.PLAYLISTS);
+            }
+        });
 
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnPrev.setOnClickListener(v -> playPrevious());
@@ -177,6 +205,32 @@ public class MainActivity extends AppCompatActivity {
         return rawX >= left && rawX <= right && rawY >= top && rawY <= bottom;
     }
 
+    private void setLibraryMode(LibraryMode mode) {
+        libraryMode = mode;
+
+        if (mode == LibraryMode.SONGS) {
+            txtLibraryTitleSet("All songs (newest first)");
+            rvLibrary.setAdapter(songsAdapter);
+            songsAdapter.notifyDataSetChanged();
+        } else {
+            txtLibraryTitleSet("Playlists");
+            rvLibrary.setAdapter(playlistsAdapter);
+
+            // Placeholder content (so the screen isn't empty)
+            if (playlists.isEmpty()) {
+                playlists.add(new Playlist(1, "Favorites", 0));
+                playlists.add(new Playlist(2, "Gym Mix", 0));
+                playlists.add(new Playlist(3, "Chill", 0));
+            }
+
+            playlistsAdapter.notifyDataSetChanged();
+        }
+    }
+
+    private void txtLibraryTitleSet(String text) {
+        TextView title = findViewById(R.id.txtLibraryTitle);
+        title.setText(text);
+    }
 
 
     private int getDropPositionInQueue(float x, float y) {

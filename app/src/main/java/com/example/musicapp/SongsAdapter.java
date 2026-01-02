@@ -41,6 +41,7 @@ public class SongsAdapter extends RecyclerView.Adapter<SongsAdapter.VH> {
         Song s = songs.get(position);
 
         holder.txtSongName.setText(s.name);
+        holder.txtSongDate.setVisibility(View.VISIBLE);
         holder.txtSongDate.setText(dateFmt.format(new Date(s.dateAddedMillis)));
 
         // Click -> play
