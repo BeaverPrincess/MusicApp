@@ -22,14 +22,20 @@ public class QueueAdapter extends RecyclerView.Adapter<QueueAdapter.VH> {
     @NonNull
     @Override
     public VH onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-        View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_queue, parent, false);
+        // Use the same row layout as the library list
+        View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_song, parent, false);
         return new VH(v);
     }
 
     @Override
     public void onBindViewHolder(@NonNull VH holder, int position) {
         Song s = items.get(position);
-        holder.txt.setText(s.name);
+
+        holder.txtSongName.setText(s.name);
+
+        // Queue typically doesn't need a date -> hide it.
+        // Remove this line and set text if you want date shown in queue too.
+        holder.txtSongDate.setVisibility(View.GONE);
 
         // First item = currently playing -> cannot be dragged/removed
         if (position == 0) {
@@ -56,10 +62,13 @@ public class QueueAdapter extends RecyclerView.Adapter<QueueAdapter.VH> {
     }
 
     static class VH extends RecyclerView.ViewHolder {
-        TextView txt;
+        TextView txtSongName;
+        TextView txtSongDate;
+
         VH(@NonNull View itemView) {
             super(itemView);
-            txt = itemView.findViewById(R.id.txtQueueItem);
+            txtSongName = itemView.findViewById(R.id.txtSongName);
+            txtSongDate = itemView.findViewById(R.id.txtSongDate);
         }
     }
 }
