@@ -229,6 +229,17 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void syncCurrentIndexToSong(Song s) {
+        if (s == null) return;
+        for (int i = 0; i < librarySongs.size(); i++) {
+            if (librarySongs.get(i).id == s.id) {
+                currentIndex = i;
+                return;
+            }
+        }
+        // if not found, leave currentIndex as-is (or you could set -1)
+    }
+
     // -----------------------
     // LONG PRESS MENU (ALL SONGS)
     // -----------------------
@@ -490,6 +501,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void playSong(Song s, boolean autoPlay) {
+        syncCurrentIndexToSong(s);
         releasePlayer();
 
         mediaPlayer = new MediaPlayer();
@@ -522,7 +534,7 @@ public class MainActivity extends AppCompatActivity {
                 txtStatus.setText("Loaded: " + next.name);
                 playSong(next, true);
             } else {
-                btnPlayPause.setText("Play");
+                playNext();
             }
         });
 
@@ -543,6 +555,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void playNext() {
         if (queueSongs.isEmpty()) return;
+
+        syncCurrentIndexToSong(queueSongs.get(0));
 
         if (queueSongs.size() > 1) {
             queueSongs.remove(0);
