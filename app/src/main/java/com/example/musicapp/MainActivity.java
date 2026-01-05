@@ -1,13 +1,16 @@
 package com.example.musicapp;
 
 import android.Manifest;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
-import android.media.MediaPlayer;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.IBinder;
 import android.provider.MediaStore;
+import android.net.Uri;
 import android.view.DragEvent;
 import android.view.View;
 import android.widget.Button;
@@ -24,7 +27,6 @@ import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -32,6 +34,7 @@ import java.util.Map;
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQ_AUDIO_PERMISSION = 1001;
+    private static final int REQ_NOTIF_PERMISSION = 1002;
 
     // UI
     private TextView txtStatus;
@@ -58,15 +61,61 @@ public class MainActivity extends AppCompatActivity {
     private Playlist currentPlaylist = null;
     private int currentIndex = -1;
 
-    // Player
-    private MediaPlayer mediaPlayer;
-    private boolean isPrepared = false;
+    // Service
+    private PlaybackService playbackService;
+    private boolean serviceBound = false;
 
     private enum LibraryMode { SONGS, PLAYLISTS }
     private LibraryMode libraryMode = LibraryMode.SONGS;
 
     private enum Screen { MAIN, PLAYLIST_DETAIL }
     private Screen screen = Screen.MAIN;
+
+    private final ServiceConnection serviceConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            PlaybackService.LocalBinder b = (PlaybackService.LocalBinder) service;
+            playbackService = b.getService();
+            serviceBound = true;
+
+            // Always push library so Next/Prev on lockscreen matches your real library ordering
+            playbackService.setLibrarySongs(librarySongs);
+
+            // Pull queue from service (source of truth: service can change it via lockscreen)
+            ArrayList<Song> svcQueue = playbackService.getQueueSnapshot();
+            if (svcQueue != null && !svcQueue.isEmpty()) {
+                queueSongs.clear();
+                queueSongs.addAll(svcQueue);
+                queueAdapter.notifyDataSetChanged();
+
+                Song current = playbackService.getCurrentSong();
+                if (current != null) {
+                    updateLoadedStatus(current);
+                    syncCurrentIndexToSong(current);
+                }
+                setControlsEnabled(true);
+                refreshPlayPauseText();
+            } else {
+                // Service has no queue yet; push whatever the Activity currently has
+                playbackService.setQueueSongs(queueSongs);
+
+                if (!queueSongs.isEmpty()) {
+                    Song s = queueSongs.get(0);
+                    updateLoadedStatus(s);
+                    setControlsEnabled(true);
+                    // Don’t force autoplay here; just load if needed
+                    playbackService.playFromQueueHead(false);
+                    refreshPlayPauseText();
+                }
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            serviceBound = false;
+            playbackService = null;
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -79,10 +128,28 @@ public class MainActivity extends AppCompatActivity {
         setupListeners();
         setupDragAndDrop();
 
-        // Default mode
         setLibraryMode(LibraryMode.SONGS);
 
+        requestNotificationPermissionIfNeeded();
         requestAudioPermissionIfNeeded();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // Ensure service exists and bind to it
+        Intent i = new Intent(this, PlaybackService.class);
+        startService(i);
+        bindService(i, serviceConnection, BIND_AUTO_CREATE);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (serviceBound) {
+            unbindService(serviceConnection);
+            serviceBound = false;
+        }
     }
 
     // -----------------------
@@ -124,8 +191,11 @@ public class MainActivity extends AppCompatActivity {
 
                     // Clicking a library song: play immediately and reset queue to just this song
                     setQueueToSingleSong(song);
+                    updateLoadedStatus(song);
                     setControlsEnabled(true);
-                    playSong(song, true);
+
+                    syncQueueToService();
+                    playHeadInService(true);
                 },
                 this::showSongHoldMenu
         );
@@ -153,9 +223,27 @@ public class MainActivity extends AppCompatActivity {
             else if (checkedId == R.id.rbPlaylists) setLibraryMode(LibraryMode.PLAYLISTS);
         });
 
-        btnPlayPause.setOnClickListener(v -> togglePlayPause());
-        btnPrev.setOnClickListener(v -> playPrevious());
-        btnNext.setOnClickListener(v -> playNext());
+        btnPlayPause.setOnClickListener(v -> {
+            if (!serviceBound) return;
+            playbackService.togglePlayPause();
+            refreshPlayPauseText();
+        });
+
+        btnNext.setOnClickListener(v -> {
+            if (!serviceBound) return;
+            playbackService.playNext();
+
+            // Pull fresh queue after service advanced
+            pullQueueFromServiceAndRefreshUI();
+        });
+
+        btnPrev.setOnClickListener(v -> {
+            if (!serviceBound) return;
+            playbackService.playPrevious();
+
+            // Pull fresh queue after service moved
+            pullQueueFromServiceAndRefreshUI();
+        });
     }
 
     // -----------------------
@@ -235,13 +323,14 @@ public class MainActivity extends AppCompatActivity {
             Song first = queueSongs.get(0);
             updateLoadedStatus(first);
             setControlsEnabled(true);
-            playSong(first, true);
+
+            syncQueueToService();
+            playHeadInService(true);
         }
     }
 
     private void buildQueueFromListStartingAt(ArrayList<Song> list, int startPos) {
         queueSongs.clear();
-
         for (int i = startPos; i < list.size(); i++) queueSongs.add(list.get(i));
         for (int i = 0; i < startPos; i++) queueSongs.add(list.get(i));
     }
@@ -264,6 +353,9 @@ public class MainActivity extends AppCompatActivity {
         int insertPos = queueSongs.size();
         queueSongs.add(song);
         queueAdapter.notifyItemInserted(insertPos);
+
+        syncQueueToService();
+
         Toast.makeText(this, "Added to queue: " + song.name, Toast.LENGTH_SHORT).show();
     }
 
@@ -344,6 +436,7 @@ public class MainActivity extends AppCompatActivity {
                             if (d.position < queueSongs.size()) {
                                 queueSongs.remove(d.position);
                                 queueAdapter.notifyItemRemoved(d.position);
+                                syncQueueToService();
                             }
                             return true;
                         }
@@ -379,9 +472,10 @@ public class MainActivity extends AppCompatActivity {
                         Song moved = queueSongs.remove(from);
                         queueSongs.add(to, moved);
                         queueAdapter.notifyItemMoved(from, to);
+
+                        syncQueueToService();
                         return true;
                     }
-
                     return false;
                 }
 
@@ -419,6 +513,18 @@ public class MainActivity extends AppCompatActivity {
     // -----------------------
     // Permissions + media loading
     // -----------------------
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return;
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED) return;
+
+        ActivityCompat.requestPermissions(
+                this,
+                new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                REQ_NOTIF_PERMISSION
+        );
+    }
 
     private void requestAudioPermissionIfNeeded() {
         String perm = (Build.VERSION.SDK_INT >= 33)
@@ -475,15 +581,29 @@ public class MainActivity extends AppCompatActivity {
 
             songsAdapter.notifyDataSetChanged();
 
-            currentIndex = 0;
-            Song first = librarySongs.get(0);
+            // Push library to service so lockscreen next/prev uses correct list
+            if (serviceBound) playbackService.setLibrarySongs(librarySongs);
 
-            setQueueToSingleSong(first);
-            updateLoadedStatus(first);
-            setControlsEnabled(true);
+            // Only auto-initialize queue if service has nothing loaded
+            boolean serviceHasQueue = serviceBound
+                    && playbackService.getQueueSnapshot() != null
+                    && !playbackService.getQueueSnapshot().isEmpty();
 
-            // Load but don't autoplay
-            playSong(first, false);
+            if (!serviceHasQueue) {
+                currentIndex = 0;
+                Song first = librarySongs.get(0);
+
+                setQueueToSingleSong(first);
+                updateLoadedStatus(first);
+                setControlsEnabled(true);
+
+                syncQueueToService();
+                playHeadInService(false); // load only, no autoplay
+                refreshPlayPauseText();
+            } else {
+                // If service already playing, keep UI in sync
+                pullQueueFromServiceAndRefreshUI();
+            }
 
         } catch (Exception e) {
             txtStatus.setText("Error loading music: " + e.getMessage());
@@ -501,6 +621,8 @@ public class MainActivity extends AppCompatActivity {
         songsAdapter.notifyDataSetChanged();
         queueSongs.clear();
         queueAdapter.notifyDataSetChanged();
+
+        if (serviceBound) playbackService.setQueueSongs(queueSongs);
     }
 
     private void setControlsEnabled(boolean enabled) {
@@ -510,7 +632,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // -----------------------
-    // Playback / queue helpers
+    // Playback / queue helpers (service-backed)
     // -----------------------
 
     private void setQueueToSingleSong(Song song) {
@@ -520,7 +642,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateLoadedStatus(Song song) {
-        txtStatus.setText("Loaded: " + song.name);
+        if (song == null) txtStatus.setText("Loaded: -");
+        else txtStatus.setText("Loaded: " + song.name);
     }
 
     private void syncCurrentIndexToSong(Song s) {
@@ -531,115 +654,45 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
         }
-        // If not found, keep currentIndex as-is
     }
 
-    private void playSong(Song s, boolean autoPlay) {
-        syncCurrentIndexToSong(s);
-        releasePlayer();
-
-        mediaPlayer = new MediaPlayer();
-        isPrepared = false;
-
-        try {
-            mediaPlayer.setDataSource(this, s.uri);
-        } catch (IOException e) {
-            txtStatus.setText("Error playing: " + e.getMessage());
-            releasePlayer();
-            return;
-        }
-
-        mediaPlayer.setOnPreparedListener(mp -> {
-            isPrepared = true;
-            if (autoPlay) {
-                mp.start();
-                btnPlayPause.setText("Pause");
-            } else {
-                btnPlayPause.setText("Play");
-            }
-        });
-
-        mediaPlayer.setOnCompletionListener(mp -> {
-            // If we have a next in queue, consume it
-            if (queueSongs.size() > 1) {
-                queueSongs.remove(0);
-                queueAdapter.notifyItemRemoved(0);
-
-                Song next = queueSongs.get(0);
-                updateLoadedStatus(next);
-                playSong(next, true);
-            } else {
-                // Otherwise continue from All Songs list
-                playNext();
-            }
-        });
-
-        mediaPlayer.prepareAsync();
+    private void syncQueueToService() {
+        if (!serviceBound) return;
+        playbackService.setLibrarySongs(librarySongs);
+        playbackService.setQueueSongs(queueSongs);
     }
 
-    private void togglePlayPause() {
-        if (mediaPlayer == null || !isPrepared) return;
+    private void playHeadInService(boolean autoPlay) {
+        if (!serviceBound) return;
+        playbackService.playFromQueueHead(autoPlay);
+    }
 
-        if (mediaPlayer.isPlaying()) {
-            mediaPlayer.pause();
+    private void refreshPlayPauseText() {
+        if (!serviceBound) {
             btnPlayPause.setText("Play");
-        } else {
-            mediaPlayer.start();
-            btnPlayPause.setText("Pause");
-        }
-    }
-
-    private void playNext() {
-        if (queueSongs.isEmpty()) return;
-
-        // Keep library index aligned even if current song came from playlist/queue
-        syncCurrentIndexToSong(queueSongs.get(0));
-
-        // If queue has more songs, just advance in queue
-        if (queueSongs.size() > 1) {
-            queueSongs.remove(0);
-            queueAdapter.notifyItemRemoved(0);
-
-            Song next = queueSongs.get(0);
-            updateLoadedStatus(next);
-            playSong(next, true);
             return;
         }
+        btnPlayPause.setText(playbackService.isPlaying() ? "Pause" : "Play");
+    }
 
-        // Otherwise follow All Songs order
-        if (!librarySongs.isEmpty()) {
-            currentIndex = (currentIndex + 1) % librarySongs.size();
-            Song s = librarySongs.get(currentIndex);
+    private void pullQueueFromServiceAndRefreshUI() {
+        if (!serviceBound) return;
 
-            setQueueToSingleSong(s);
-            updateLoadedStatus(s);
-            playSong(s, true);
+        ArrayList<Song> svcQueue = playbackService.getQueueSnapshot();
+        queueSongs.clear();
+        if (svcQueue != null) queueSongs.addAll(svcQueue);
+        queueAdapter.notifyDataSetChanged();
+
+        Song current = playbackService.getCurrentSong();
+        if (current != null) {
+            updateLoadedStatus(current);
+            syncCurrentIndexToSong(current);
+            setControlsEnabled(true);
+        } else {
+            setControlsEnabled(false);
         }
-    }
 
-    private void playPrevious() {
-        if (librarySongs.isEmpty()) return;
-
-        currentIndex = (currentIndex - 1 + librarySongs.size()) % librarySongs.size();
-        Song s = librarySongs.get(currentIndex);
-
-        setQueueToSingleSong(s);
-        updateLoadedStatus(s);
-        playSong(s, true);
-    }
-
-    private void releasePlayer() {
-        if (mediaPlayer != null) {
-            mediaPlayer.release();
-            mediaPlayer = null;
-        }
-        isPrepared = false;
-    }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        releasePlayer();
+        refreshPlayPauseText();
     }
 
     // -----------------------
@@ -657,6 +710,12 @@ public class MainActivity extends AppCompatActivity {
                 txtStatus.setText("Permission denied. Can't read music files.");
                 setControlsEnabled(false);
             }
+            return;
+        }
+
+        if (requestCode == REQ_NOTIF_PERMISSION) {
+            // If denied: music still plays; lockscreen controls may not show on Android 13+
+            return;
         }
     }
 }
