@@ -33,33 +33,32 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int REQ_AUDIO_PERMISSION = 1001;
 
+    // UI
     private TextView txtStatus;
     private TextView txtLibraryTitle;
     private Button btnPrev, btnPlayPause, btnNext;
-
     private Button btnPlaylistBack;
-
     private RadioGroup rgLibraryMode;
     private RadioButton rbSongs, rbPlaylists;
-
     private RecyclerView rvQueue, rvLibrary;
-    private QueueAdapter queueAdapter;
 
+    // Adapters
+    private QueueAdapter queueAdapter;
     private SongsAdapter songsAdapter;          // All songs
     private SongsAdapter playlistSongsAdapter;  // Songs inside a playlist
     private PlaylistsAdapter playlistsAdapter;
 
+    // Data
     private final ArrayList<Song> queueSongs = new ArrayList<>();
     private final ArrayList<Song> librarySongs = new ArrayList<>();
-
     private final ArrayList<Playlist> playlists = new ArrayList<>();
     private final Map<Long, ArrayList<Song>> playlistToSongs = new HashMap<>();
-
     private final ArrayList<Song> playlistViewSongs = new ArrayList<>();
-    private Playlist currentPlaylist = null;
 
+    private Playlist currentPlaylist = null;
     private int currentIndex = -1;
 
+    // Player
     private MediaPlayer mediaPlayer;
     private boolean isPrepared = false;
 
@@ -74,6 +73,23 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        bindViews();
+        setupRecyclerViews();
+        setupAdapters();
+        setupListeners();
+        setupDragAndDrop();
+
+        // Default mode
+        setLibraryMode(LibraryMode.SONGS);
+
+        requestAudioPermissionIfNeeded();
+    }
+
+    // -----------------------
+    // Init / setup
+    // -----------------------
+
+    private void bindViews() {
         txtStatus = findViewById(R.id.txtStatus);
         txtLibraryTitle = findViewById(R.id.txtLibraryTitle);
 
@@ -89,51 +105,50 @@ public class MainActivity extends AppCompatActivity {
 
         rvQueue = findViewById(R.id.rvQueue);
         rvLibrary = findViewById(R.id.rvLibrary);
+    }
 
-        // Queue RV
+    private void setupRecyclerViews() {
         rvQueue.setLayoutManager(new LinearLayoutManager(this));
-        queueAdapter = new QueueAdapter(queueSongs);
-        rvQueue.setAdapter(queueAdapter);
-
-        // Library RV
         rvLibrary.setLayoutManager(new LinearLayoutManager(this));
 
-        // All songs adapter
+        queueAdapter = new QueueAdapter(queueSongs);
+        rvQueue.setAdapter(queueAdapter);
+    }
+
+    private void setupAdapters() {
+        // All songs
         songsAdapter = new SongsAdapter(
                 librarySongs,
                 (position, song) -> {
                     currentIndex = position;
 
                     // Clicking a library song: play immediately and reset queue to just this song
-                    queueSongs.clear();
-                    queueSongs.add(song);
-                    queueAdapter.notifyDataSetChanged();
-
+                    setQueueToSingleSong(song);
                     setControlsEnabled(true);
                     playSong(song, true);
                 },
                 this::showSongHoldMenu
         );
 
-        // Playlist songs adapter (no long press needed here)
+        // Playlist detail list (no long press)
         playlistSongsAdapter = new SongsAdapter(
                 playlistViewSongs,
                 (position, song) -> playFromPlaylist(position),
                 null
         );
 
-        // Playlists list adapter
-        playlistsAdapter = new PlaylistsAdapter(playlists, (position, playlist) -> openPlaylist(playlist));
+        // Playlists list
+        playlistsAdapter = new PlaylistsAdapter(
+                playlists,
+                (position, playlist) -> openPlaylist(playlist)
+        );
+    }
 
-        // Back button
+    private void setupListeners() {
         btnPlaylistBack.setOnClickListener(v -> closePlaylist());
-
-        // Toggle main list modes
-        setLibraryMode(LibraryMode.SONGS);
 
         rgLibraryMode.setOnCheckedChangeListener((group, checkedId) -> {
             if (screen == Screen.PLAYLIST_DETAIL) return; // ignore toggle inside playlist
-
             if (checkedId == R.id.rbSongs) setLibraryMode(LibraryMode.SONGS);
             else if (checkedId == R.id.rbPlaylists) setLibraryMode(LibraryMode.PLAYLISTS);
         });
@@ -141,13 +156,10 @@ public class MainActivity extends AppCompatActivity {
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnPrev.setOnClickListener(v -> playPrevious());
         btnNext.setOnClickListener(v -> playNext());
-
-        setupDragAndDrop();
-        requestAudioPermissionIfNeeded();
     }
 
     // -----------------------
-    // MAIN SCREEN MODE SWITCH
+    // Screen / mode switching
     // -----------------------
 
     private void setLibraryMode(LibraryMode mode) {
@@ -165,22 +177,11 @@ public class MainActivity extends AppCompatActivity {
             txtLibraryTitle.setText("Playlists");
             rvLibrary.setAdapter(playlistsAdapter);
 
-            // Placeholder playlists (you can replace later with real creation/storage)
-            if (playlists.isEmpty()) {
-                playlists.add(new Playlist(1, "Favorites", 0));
-                playlists.add(new Playlist(2, "Gym Mix", 0));
-                playlists.add(new Playlist(3, "Chill", 0));
-            }
-
-            // Refresh counts based on stored songs
+            seedPlaylistsIfEmpty();
             refreshAllPlaylistCounts();
             playlistsAdapter.notifyDataSetChanged();
         }
     }
-
-    // -----------------------
-    // PLAYLIST DETAIL SCREEN
-    // -----------------------
 
     private void openPlaylist(Playlist playlist) {
         screen = Screen.PLAYLIST_DETAIL;
@@ -205,43 +206,48 @@ public class MainActivity extends AppCompatActivity {
         currentPlaylist = null;
         screen = Screen.MAIN;
 
-        // Return to playlists list (not songs)
+        // Return to playlists list
         rbPlaylists.setChecked(true);
         setLibraryMode(LibraryMode.PLAYLISTS);
     }
+
+    private void seedPlaylistsIfEmpty() {
+        // Placeholder playlists
+        if (playlists.isEmpty()) {
+            playlists.add(new Playlist(1, "Favorites", 0));
+            playlists.add(new Playlist(2, "Gym Mix", 0));
+            playlists.add(new Playlist(3, "Chill", 0));
+        }
+    }
+
+    // -----------------------
+    // Playlist playback
+    // -----------------------
 
     private void playFromPlaylist(int clickedPos) {
         if (clickedPos < 0 || clickedPos >= playlistViewSongs.size()) return;
 
         // Replace whole queue with that playlist, starting from clicked song
-        queueSongs.clear();
-
-        for (int i = clickedPos; i < playlistViewSongs.size(); i++) queueSongs.add(playlistViewSongs.get(i));
-        for (int i = 0; i < clickedPos; i++) queueSongs.add(playlistViewSongs.get(i));
-
+        buildQueueFromListStartingAt(playlistViewSongs, clickedPos);
         queueAdapter.notifyDataSetChanged();
 
         if (!queueSongs.isEmpty()) {
             Song first = queueSongs.get(0);
-            txtStatus.setText("Loaded: " + first.name);
+            updateLoadedStatus(first);
             setControlsEnabled(true);
             playSong(first, true);
         }
     }
 
-    private void syncCurrentIndexToSong(Song s) {
-        if (s == null) return;
-        for (int i = 0; i < librarySongs.size(); i++) {
-            if (librarySongs.get(i).id == s.id) {
-                currentIndex = i;
-                return;
-            }
-        }
-        // if not found, leave currentIndex as-is (or you could set -1)
+    private void buildQueueFromListStartingAt(ArrayList<Song> list, int startPos) {
+        queueSongs.clear();
+
+        for (int i = startPos; i < list.size(); i++) queueSongs.add(list.get(i));
+        for (int i = 0; i < startPos; i++) queueSongs.add(list.get(i));
     }
 
     // -----------------------
-    // LONG PRESS MENU (ALL SONGS)
+    // Long press menu (All songs)
     // -----------------------
 
     private void showSongHoldMenu(Song song) {
@@ -283,7 +289,7 @@ public class MainActivity extends AppCompatActivity {
             playlistToSongs.put(playlist.id, list);
         }
 
-        // prevent duplicates by song.id
+        // Prevent duplicates by song.id
         for (Song s : list) {
             if (s.id == song.id) {
                 Toast.makeText(this, "Already in " + playlist.name, Toast.LENGTH_SHORT).show();
@@ -446,11 +452,7 @@ public class MainActivity extends AppCompatActivity {
                 sortOrder
         )) {
             if (cursor == null || !cursor.moveToFirst()) {
-                txtStatus.setText("No music found. Put an MP3 in Internal storage > Music.");
-                setControlsEnabled(false);
-                songsAdapter.notifyDataSetChanged();
-                queueSongs.clear();
-                queueAdapter.notifyDataSetChanged();
+                handleNoMusicFound();
                 return;
             }
 
@@ -476,13 +478,11 @@ public class MainActivity extends AppCompatActivity {
             currentIndex = 0;
             Song first = librarySongs.get(0);
 
-            queueSongs.clear();
-            queueSongs.add(first);
-            queueAdapter.notifyDataSetChanged();
-
-            txtStatus.setText("Loaded: " + first.name);
+            setQueueToSingleSong(first);
+            updateLoadedStatus(first);
             setControlsEnabled(true);
 
+            // Load but don't autoplay
             playSong(first, false);
 
         } catch (Exception e) {
@@ -494,10 +494,44 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void handleNoMusicFound() {
+        txtStatus.setText("No music found. Put an MP3 in Internal storage > Music.");
+        setControlsEnabled(false);
+
+        songsAdapter.notifyDataSetChanged();
+        queueSongs.clear();
+        queueAdapter.notifyDataSetChanged();
+    }
+
     private void setControlsEnabled(boolean enabled) {
         btnPlayPause.setEnabled(enabled);
         btnPrev.setEnabled(enabled);
         btnNext.setEnabled(enabled);
+    }
+
+    // -----------------------
+    // Playback / queue helpers
+    // -----------------------
+
+    private void setQueueToSingleSong(Song song) {
+        queueSongs.clear();
+        queueSongs.add(song);
+        queueAdapter.notifyDataSetChanged();
+    }
+
+    private void updateLoadedStatus(Song song) {
+        txtStatus.setText("Loaded: " + song.name);
+    }
+
+    private void syncCurrentIndexToSong(Song s) {
+        if (s == null) return;
+        for (int i = 0; i < librarySongs.size(); i++) {
+            if (librarySongs.get(i).id == s.id) {
+                currentIndex = i;
+                return;
+            }
+        }
+        // If not found, keep currentIndex as-is
     }
 
     private void playSong(Song s, boolean autoPlay) {
@@ -526,14 +560,16 @@ public class MainActivity extends AppCompatActivity {
         });
 
         mediaPlayer.setOnCompletionListener(mp -> {
+            // If we have a next in queue, consume it
             if (queueSongs.size() > 1) {
                 queueSongs.remove(0);
                 queueAdapter.notifyItemRemoved(0);
 
                 Song next = queueSongs.get(0);
-                txtStatus.setText("Loaded: " + next.name);
+                updateLoadedStatus(next);
                 playSong(next, true);
             } else {
+                // Otherwise continue from All Songs list
                 playNext();
             }
         });
@@ -556,27 +592,27 @@ public class MainActivity extends AppCompatActivity {
     private void playNext() {
         if (queueSongs.isEmpty()) return;
 
+        // Keep library index aligned even if current song came from playlist/queue
         syncCurrentIndexToSong(queueSongs.get(0));
 
+        // If queue has more songs, just advance in queue
         if (queueSongs.size() > 1) {
             queueSongs.remove(0);
             queueAdapter.notifyItemRemoved(0);
 
             Song next = queueSongs.get(0);
-            txtStatus.setText("Loaded: " + next.name);
+            updateLoadedStatus(next);
             playSong(next, true);
             return;
         }
 
+        // Otherwise follow All Songs order
         if (!librarySongs.isEmpty()) {
             currentIndex = (currentIndex + 1) % librarySongs.size();
             Song s = librarySongs.get(currentIndex);
 
-            queueSongs.clear();
-            queueSongs.add(s);
-            queueAdapter.notifyDataSetChanged();
-
-            txtStatus.setText("Loaded: " + s.name);
+            setQueueToSingleSong(s);
+            updateLoadedStatus(s);
             playSong(s, true);
         }
     }
@@ -587,11 +623,8 @@ public class MainActivity extends AppCompatActivity {
         currentIndex = (currentIndex - 1 + librarySongs.size()) % librarySongs.size();
         Song s = librarySongs.get(currentIndex);
 
-        queueSongs.clear();
-        queueSongs.add(s);
-        queueAdapter.notifyDataSetChanged();
-
-        txtStatus.setText("Loaded: " + s.name);
+        setQueueToSingleSong(s);
+        updateLoadedStatus(s);
         playSong(s, true);
     }
 
@@ -608,6 +641,10 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         releasePlayer();
     }
+
+    // -----------------------
+    // Permissions callback
+    // -----------------------
 
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
