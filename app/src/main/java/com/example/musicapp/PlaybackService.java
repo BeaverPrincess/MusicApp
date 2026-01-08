@@ -171,20 +171,12 @@ public class PlaybackService extends Service {
         });
 
         mediaSession.setActive(true);
-
-        // Optional: load library so Next/Prev works even if Activity never binds.
         loadLibraryNewestFirst();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_STICKY;
-
-        // -----------------------
-        // NEW: Earphone / Bluetooth media button handling
-        // If a headset sends PLAY/PAUSE/NEXT/PREV, Android delivers ACTION_MEDIA_BUTTON.
-        // This forwards it into MediaSession callbacks above.
-        // -----------------------
         if (Intent.ACTION_MEDIA_BUTTON.equals(intent.getAction())) {
             MediaButtonReceiver.handleIntent(mediaSession, intent);
             return START_STICKY;

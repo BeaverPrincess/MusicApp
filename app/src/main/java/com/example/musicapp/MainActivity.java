@@ -17,6 +17,7 @@ import android.net.Uri;
 import android.view.DragEvent;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.TextView;
@@ -30,15 +31,22 @@ import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
-import androidx.core.content.ContextCompat;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQ_AUDIO_PERMISSION = 1001;
     private static final int REQ_NOTIF_PERMISSION = 1002;
+
+    // ---- Playlist persistence (NEW) ----
+    private static final String PREFS_NAME = "musicapp_prefs";
+    private static final String KEY_PLAYLISTS_STATE = "playlists_state_v1";
 
     // UI
     private TextView txtStatus;
@@ -59,7 +67,11 @@ public class MainActivity extends AppCompatActivity {
     private final ArrayList<Song> queueSongs = new ArrayList<>();
     private final ArrayList<Song> librarySongs = new ArrayList<>();
     private final ArrayList<Playlist> playlists = new ArrayList<>();
-    private final Map<Long, ArrayList<Song>> playlistToSongs = new HashMap<>();
+
+    // IMPORTANT CHANGE: store song IDs per playlist so we can persist easily
+    private final Map<Long, ArrayList<Long>> playlistToSongIds = new HashMap<>();
+
+    // What we show inside playlist detail (resolved Song objects from librarySongs)
     private final ArrayList<Song> playlistViewSongs = new ArrayList<>();
 
     private Playlist currentPlaylist = null;
@@ -75,16 +87,13 @@ public class MainActivity extends AppCompatActivity {
     private enum Screen { MAIN, PLAYLIST_DETAIL }
     private Screen screen = Screen.MAIN;
 
-    // NEW: Receive service state changes (pause due to YouTube etc.)
+    // NEW: Receive service state changes (pause due to focus, earphones, etc.)
     private final BroadcastReceiver playbackStateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (PlaybackService.ACTION_STATE_CHANGED.equals(intent.getAction())) {
-                if (serviceBound) {
-                    pullQueueFromServiceAndRefreshUI();
-                } else {
-                    refreshPlayPauseText();
-                }
+                if (serviceBound) pullQueueFromServiceAndRefreshUI();
+                else refreshPlayPauseText();
             }
         }
     };
@@ -96,8 +105,10 @@ public class MainActivity extends AppCompatActivity {
             playbackService = b.getService();
             serviceBound = true;
 
+            // Always push library so Next/Prev works in correct order
             playbackService.setLibrarySongs(librarySongs);
 
+            // Pull queue from service
             ArrayList<Song> svcQueue = playbackService.getQueueSnapshot();
             if (svcQueue != null && !svcQueue.isEmpty()) {
                 queueSongs.clear();
@@ -112,6 +123,7 @@ public class MainActivity extends AppCompatActivity {
                 setControlsEnabled(true);
                 refreshPlayPauseText();
             } else {
+                // service has nothing yet; push current queue
                 playbackService.setQueueSongs(queueSongs);
 
                 if (!queueSongs.isEmpty()) {
@@ -142,6 +154,9 @@ public class MainActivity extends AppCompatActivity {
         setupListeners();
         setupDragAndDrop();
 
+        // NEW: load playlists from disk before showing UI
+        loadPlaylistsFromStorage();
+
         setLibraryMode(LibraryMode.SONGS);
 
         requestNotificationPermissionIfNeeded();
@@ -152,7 +167,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onStart() {
         super.onStart();
 
-        // NEW: listen for service state updates (pause/play due to audio focus)
+        // Receiver flags fix (Android 13+ lint-safe)
         IntentFilter f = new IntentFilter(PlaybackService.ACTION_STATE_CHANGED);
         ContextCompat.registerReceiver(
                 this,
@@ -161,6 +176,7 @@ public class MainActivity extends AppCompatActivity {
                 ContextCompat.RECEIVER_NOT_EXPORTED
         );
 
+        // Ensure service exists and bind
         Intent i = new Intent(this, PlaybackService.class);
         startService(i);
         bindService(i, serviceConnection, BIND_AUTO_CREATE);
@@ -209,11 +225,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupAdapters() {
+        // All songs
         songsAdapter = new SongsAdapter(
                 librarySongs,
                 (position, song) -> {
                     currentIndex = position;
 
+                    // Clicking a library song: play immediately and reset queue to just this song
                     setQueueToSingleSong(song);
                     updateLoadedStatus(song);
                     setControlsEnabled(true);
@@ -224,12 +242,14 @@ public class MainActivity extends AppCompatActivity {
                 this::showSongHoldMenu
         );
 
+        // Playlist detail list (click to play from playlist)
         playlistSongsAdapter = new SongsAdapter(
                 playlistViewSongs,
                 (position, song) -> playFromPlaylist(position),
                 null
         );
 
+        // Playlists list
         playlistsAdapter = new PlaylistsAdapter(
                 playlists,
                 (position, playlist) -> openPlaylist(playlist)
@@ -275,6 +295,9 @@ public class MainActivity extends AppCompatActivity {
         btnPlaylistBack.setVisibility(View.GONE);
         rgLibraryMode.setVisibility(View.VISIBLE);
 
+        // Clear any previous long-click to avoid surprises
+        txtLibraryTitle.setOnLongClickListener(null);
+
         if (mode == LibraryMode.SONGS) {
             txtLibraryTitle.setText("All songs (newest first)");
             rvLibrary.setAdapter(songsAdapter);
@@ -283,9 +306,16 @@ public class MainActivity extends AppCompatActivity {
             txtLibraryTitle.setText("Playlists");
             rvLibrary.setAdapter(playlistsAdapter);
 
-            seedPlaylistsIfEmpty();
+            // NEW: long-press title to create playlist (no XML changes needed)
+            txtLibraryTitle.setOnLongClickListener(v -> {
+                showCreatePlaylistDialog();
+                return true;
+            });
+
             refreshAllPlaylistCounts();
             playlistsAdapter.notifyDataSetChanged();
+
+            Toast.makeText(this, "Tip: long-press 'Playlists' title to create one", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -298,10 +328,7 @@ public class MainActivity extends AppCompatActivity {
 
         txtLibraryTitle.setText(playlist.name);
 
-        playlistViewSongs.clear();
-        ArrayList<Song> stored = playlistToSongs.get(playlist.id);
-        if (stored != null) playlistViewSongs.addAll(stored);
-
+        rebuildPlaylistViewSongs();
         rvLibrary.setAdapter(playlistSongsAdapter);
         playlistSongsAdapter.notifyDataSetChanged();
     }
@@ -316,12 +343,48 @@ public class MainActivity extends AppCompatActivity {
         setLibraryMode(LibraryMode.PLAYLISTS);
     }
 
-    private void seedPlaylistsIfEmpty() {
-        if (playlists.isEmpty()) {
-            playlists.add(new Playlist(1, "Favorites", 0));
-            playlists.add(new Playlist(2, "Gym Mix", 0));
-            playlists.add(new Playlist(3, "Chill", 0));
-        }
+    // -----------------------
+    // Create playlist (NEW)
+    // -----------------------
+
+    private void showCreatePlaylistDialog() {
+        EditText input = new EditText(this);
+        input.setHint("Playlist name");
+
+        new AlertDialog.Builder(this)
+                .setTitle("Create playlist")
+                .setView(input)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Create", (d, w) -> {
+                    String name = input.getText() == null ? "" : input.getText().toString().trim();
+                    if (name.isEmpty()) {
+                        Toast.makeText(this, "Name can't be empty", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+
+                    // prevent duplicate names (optional but nice)
+                    for (Playlist p : playlists) {
+                        if (p.name != null && p.name.equalsIgnoreCase(name)) {
+                            Toast.makeText(this, "Playlist already exists", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                    }
+
+                    long newId = nextPlaylistId();
+                    Playlist p = new Playlist(newId, name, 0);
+                    playlists.add(p);
+                    playlistToSongIds.put(newId, new ArrayList<>());
+
+                    savePlaylistsToStorage();
+                    refreshAllPlaylistCounts();
+
+                    if (libraryMode == LibraryMode.PLAYLISTS && screen == Screen.MAIN) {
+                        playlistsAdapter.notifyDataSetChanged();
+                    }
+
+                    Toast.makeText(this, "Created: " + name, Toast.LENGTH_SHORT).show();
+                })
+                .show();
     }
 
     // -----------------------
@@ -331,6 +394,7 @@ public class MainActivity extends AppCompatActivity {
     private void playFromPlaylist(int clickedPos) {
         if (clickedPos < 0 || clickedPos >= playlistViewSongs.size()) return;
 
+        // Replace whole queue with that playlist, starting from clicked song
         buildQueueFromListStartingAt(playlistViewSongs, clickedPos);
         queueAdapter.notifyDataSetChanged();
 
@@ -348,6 +412,26 @@ public class MainActivity extends AppCompatActivity {
         queueSongs.clear();
         for (int i = startPos; i < list.size(); i++) queueSongs.add(list.get(i));
         for (int i = 0; i < startPos; i++) queueSongs.add(list.get(i));
+    }
+
+    private void rebuildPlaylistViewSongs() {
+        playlistViewSongs.clear();
+        if (currentPlaylist == null) return;
+
+        ArrayList<Long> ids = playlistToSongIds.get(currentPlaylist.id);
+        if (ids == null) return;
+
+        for (Long songId : ids) {
+            Song s = findSongInLibraryById(songId);
+            if (s != null) playlistViewSongs.add(s);
+        }
+    }
+
+    private Song findSongInLibraryById(long id) {
+        for (Song s : librarySongs) {
+            if (s.id == id) return s;
+        }
+        return null;
     }
 
     // -----------------------
@@ -375,7 +459,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void showPlaylistPicker(Song song) {
         if (playlists.isEmpty()) {
-            Toast.makeText(this, "No playlists yet", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "No playlists yet. Long-press Playlists title to create one.", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -389,28 +473,32 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void addSongToPlaylist(Song song, Playlist playlist) {
-        ArrayList<Song> list = playlistToSongs.get(playlist.id);
-        if (list == null) {
-            list = new ArrayList<>();
-            playlistToSongs.put(playlist.id, list);
+        ArrayList<Long> ids = playlistToSongIds.get(playlist.id);
+        if (ids == null) {
+            ids = new ArrayList<>();
+            playlistToSongIds.put(playlist.id, ids);
         }
 
-        for (Song s : list) {
-            if (s.id == song.id) {
+        // Prevent duplicates
+        for (Long existingId : ids) {
+            if (existingId == song.id) {
                 Toast.makeText(this, "Already in " + playlist.name, Toast.LENGTH_SHORT).show();
                 return;
             }
         }
 
-        list.add(song);
-        playlist.songCount = list.size();
+        ids.add(song.id);
+        playlist.songCount = ids.size();
 
+        savePlaylistsToStorage();
+
+        // If we are currently viewing this playlist, update immediately
         if (screen == Screen.PLAYLIST_DETAIL && currentPlaylist != null && currentPlaylist.id == playlist.id) {
-            playlistViewSongs.clear();
-            playlistViewSongs.addAll(list);
+            rebuildPlaylistViewSongs();
             playlistSongsAdapter.notifyDataSetChanged();
         }
 
+        // If playlists list is on screen, update counts
         if (screen == Screen.MAIN && libraryMode == LibraryMode.PLAYLISTS) {
             playlistsAdapter.notifyDataSetChanged();
         }
@@ -420,8 +508,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshAllPlaylistCounts() {
         for (Playlist p : playlists) {
-            ArrayList<Song> list = playlistToSongs.get(p.id);
-            p.songCount = (list == null) ? 0 : list.size();
+            ArrayList<Long> ids = playlistToSongIds.get(p.id);
+            p.songCount = (ids == null) ? 0 : ids.size();
         }
     }
 
@@ -592,8 +680,20 @@ public class MainActivity extends AppCompatActivity {
 
             songsAdapter.notifyDataSetChanged();
 
+            // Push library to service
             if (serviceBound) playbackService.setLibrarySongs(librarySongs);
 
+            // NEW: now that library is loaded, resolve playlist songs for the currently opened playlist
+            refreshAllPlaylistCounts();
+            if (libraryMode == LibraryMode.PLAYLISTS && screen == Screen.MAIN) {
+                playlistsAdapter.notifyDataSetChanged();
+            }
+            if (screen == Screen.PLAYLIST_DETAIL) {
+                rebuildPlaylistViewSongs();
+                playlistSongsAdapter.notifyDataSetChanged();
+            }
+
+            // Only auto-initialize queue if service has nothing loaded
             boolean serviceHasQueue = serviceBound
                     && playbackService.getQueueSnapshot() != null
                     && !playbackService.getQueueSnapshot().isEmpty();
@@ -607,7 +707,7 @@ public class MainActivity extends AppCompatActivity {
                 setControlsEnabled(true);
 
                 syncQueueToService();
-                playHeadInService(false);
+                playHeadInService(false); // load only, no autoplay
                 refreshPlayPauseText();
             } else {
                 pullQueueFromServiceAndRefreshUI();
@@ -723,6 +823,102 @@ public class MainActivity extends AppCompatActivity {
 
         if (requestCode == REQ_NOTIF_PERMISSION) {
             return;
+        }
+    }
+
+    // -----------------------
+    // Playlist persistence (NEW)
+    // -----------------------
+
+    private long nextPlaylistId() {
+        // Generate a stable ID even across restarts
+        long max = 0;
+        for (Playlist p : playlists) {
+            if (p.id > max) max = p.id;
+        }
+        return max + 1;
+    }
+
+    private void savePlaylistsToStorage() {
+        JSONObject root = new JSONObject();
+        JSONArray pls = new JSONArray();
+        JSONObject map = new JSONObject();
+
+        try {
+            for (Playlist p : playlists) {
+                JSONObject po = new JSONObject();
+                po.put("id", p.id);
+                po.put("name", p.name);
+                pls.put(po);
+
+                ArrayList<Long> ids = playlistToSongIds.get(p.id);
+                JSONArray songIdsArr = new JSONArray();
+                if (ids != null) {
+                    for (Long sid : ids) songIdsArr.put(sid);
+                }
+                map.put(String.valueOf(p.id), songIdsArr);
+            }
+
+            root.put("playlists", pls);
+            root.put("songsByPlaylist", map);
+
+        } catch (JSONException ignored) {}
+
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putString(KEY_PLAYLISTS_STATE, root.toString())
+                .apply();
+    }
+
+    private void loadPlaylistsFromStorage() {
+        playlists.clear();
+        playlistToSongIds.clear();
+
+        String json = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(KEY_PLAYLISTS_STATE, null);
+
+        if (json == null || json.trim().isEmpty()) {
+            // Start empty (no placeholders anymore)
+            return;
+        }
+
+        try {
+            JSONObject root = new JSONObject(json);
+            JSONArray pls = root.optJSONArray("playlists");
+            JSONObject map = root.optJSONObject("songsByPlaylist");
+
+            if (pls != null) {
+                for (int i = 0; i < pls.length(); i++) {
+                    JSONObject po = pls.optJSONObject(i);
+                    if (po == null) continue;
+                    long id = po.optLong("id", -1);
+                    String name = po.optString("name", "");
+                    if (id == -1 || name.isEmpty()) continue;
+
+                    playlists.add(new Playlist(id, name, 0));
+                }
+            }
+
+            if (map != null) {
+                for (Playlist p : playlists) {
+                    JSONArray songIdsArr = map.optJSONArray(String.valueOf(p.id));
+                    ArrayList<Long> ids = new ArrayList<>();
+                    if (songIdsArr != null) {
+                        for (int j = 0; j < songIdsArr.length(); j++) {
+                            long sid = songIdsArr.optLong(j, -1);
+                            if (sid != -1) ids.add(sid);
+                        }
+                    }
+                    playlistToSongIds.put(p.id, ids);
+                }
+            }
+
+            refreshAllPlaylistCounts();
+
+        } catch (JSONException e) {
+            // Bad JSON: ignore and start empty
+            playlists.clear();
+            playlistToSongIds.clear();
         }
     }
 }
