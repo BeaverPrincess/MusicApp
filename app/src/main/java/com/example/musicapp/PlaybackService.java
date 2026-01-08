@@ -5,8 +5,8 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.Intent;
 import android.content.Context;
+import android.content.Intent;
 import android.database.Cursor;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
@@ -21,28 +21,41 @@ import android.provider.MediaStore;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
+import androidx.media.session.MediaButtonReceiver;
 import android.support.v4.media.session.MediaSessionCompat;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import android.view.KeyEvent;
 
 public class PlaybackService extends Service {
+
     public static final String ACTION_TOGGLE = "com.example.musicapp.action.TOGGLE";
     public static final String ACTION_NEXT   = "com.example.musicapp.action.NEXT";
     public static final String ACTION_PREV   = "com.example.musicapp.action.PREV";
     public static final String ACTION_PLAY_SONG = "com.example.musicapp.action.PLAY_SONG";
-    // Broadcast to keep Activity UI in sync
+
     public static final String ACTION_STATE_CHANGED = "com.example.musicapp.action.STATE_CHANGED";
+
     public static final String EXTRA_SONG_ID = "extra_song_id";
+
     private static final String CHANNEL_ID = "music_playback";
     private static final int NOTIF_ID = 42;
+
     private final IBinder binder = new LocalBinder();
+
     private MediaPlayer mediaPlayer;
     private boolean isPrepared = false;
+
     private final ArrayList<Song> queueSongs = new ArrayList<>();
     private final ArrayList<Song> librarySongs = new ArrayList<>();
     private int currentIndex = -1;
+
     private MediaSessionCompat mediaSession;
+
+    // -----------------------
+    // Audio focus
+    // -----------------------
     private AudioManager audioManager;
     private AudioFocusRequest audioFocusRequest; // API 26+
     private boolean resumeOnFocusGain = false;
@@ -50,22 +63,13 @@ public class PlaybackService extends Service {
     private final AudioManager.OnAudioFocusChangeListener focusChangeListener = focusChange -> {
         switch (focusChange) {
             case AudioManager.AUDIOFOCUS_LOSS:
-                // Permanent loss: pause and don't auto-resume
                 if (isPlaying()) pauseInternal(true, false);
                 abandonAudioFocus();
                 resumeOnFocusGain = false;
                 break;
 
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                // Temporary loss: pause and remember we should resume
-                if (isPlaying()) {
-                    resumeOnFocusGain = true;
-                    pauseInternal(true, false);
-                }
-                break;
-
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                // Easiest/cleanest: pause instead of ducking
                 if (isPlaying()) {
                     resumeOnFocusGain = true;
                     pauseInternal(true, false);
@@ -73,7 +77,6 @@ public class PlaybackService extends Service {
                 break;
 
             case AudioManager.AUDIOFOCUS_GAIN:
-                // Resume only if we paused due to transient focus loss
                 if (resumeOnFocusGain) {
                     resumeOnFocusGain = false;
                     ensurePreparedThenPlay();
@@ -100,8 +103,63 @@ public class PlaybackService extends Service {
 
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
+        // -----------------------
+        // MediaSession (earphones / Bluetooth controls)
+        // -----------------------
         mediaSession = new MediaSessionCompat(this, "PlaybackService");
+
+        // IMPORTANT: tells Android we handle headset media buttons + transport controls
+        mediaSession.setFlags(
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS |
+                        MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+        );
+
+        // IMPORTANT: connect receiver so ACTION_MEDIA_BUTTON gets routed correctly
+        Intent mediaButtonIntent = new Intent(Intent.ACTION_MEDIA_BUTTON);
+        mediaButtonIntent.setClass(this, MediaButtonReceiver.class);
+        PendingIntent mediaButtonPi = PendingIntent.getBroadcast(
+                this,
+                0,
+                mediaButtonIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0)
+        );
+        mediaSession.setMediaButtonReceiver(mediaButtonPi);
+
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
+
+            @Override
+            public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                KeyEvent ke = mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                if (ke == null) return super.onMediaButtonEvent(mediaButtonIntent);
+
+                // Only handle ACTION_DOWN to avoid double-trigger
+                if (ke.getAction() != KeyEvent.ACTION_DOWN) return true;
+
+                switch (ke.getKeyCode()) {
+                    case KeyEvent.KEYCODE_HEADSETHOOK:
+                    case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                        togglePlayPause();
+                        return true;
+
+                    case KeyEvent.KEYCODE_MEDIA_PLAY:
+                        ensurePreparedThenPlay();
+                        return true;
+
+                    case KeyEvent.KEYCODE_MEDIA_PAUSE:
+                        pauseInternal(false, true);
+                        return true;
+
+                    case KeyEvent.KEYCODE_MEDIA_NEXT:
+                        playNext();
+                        return true;
+
+                    case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+                        playPrevious();
+                        return true;
+                }
+                return super.onMediaButtonEvent(mediaButtonIntent);
+            }
+
             @Override public void onPlay() { ensurePreparedThenPlay(); }
             @Override public void onPause() { pauseInternal(false, true); }
             @Override public void onSkipToNext() { playNext(); }
@@ -111,9 +169,10 @@ public class PlaybackService extends Service {
                 stopSelf();
             }
         });
+
         mediaSession.setActive(true);
 
-        // load library here so Next/Prev works even if Activity never binds.
+        // Optional: load library so Next/Prev works even if Activity never binds.
         loadLibraryNewestFirst();
     }
 
@@ -121,6 +180,17 @@ public class PlaybackService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_STICKY;
 
+        // -----------------------
+        // NEW: Earphone / Bluetooth media button handling
+        // If a headset sends PLAY/PAUSE/NEXT/PREV, Android delivers ACTION_MEDIA_BUTTON.
+        // This forwards it into MediaSession callbacks above.
+        // -----------------------
+        if (Intent.ACTION_MEDIA_BUTTON.equals(intent.getAction())) {
+            MediaButtonReceiver.handleIntent(mediaSession, intent);
+            return START_STICKY;
+        }
+
+        // Your existing actions
         String action = intent.getAction();
         if (ACTION_TOGGLE.equals(action)) {
             togglePlayPause();
@@ -257,11 +327,7 @@ public class PlaybackService extends Service {
 
             if (autoPlay) {
                 boolean focusGranted = requestAudioFocus(finalAttrs);
-                if (focusGranted) {
-                    mp.start();
-                } else {
-                    // Can't get focus: remain prepared but not playing
-                }
+                if (focusGranted) mp.start();
             }
 
             updateNotification();
@@ -290,13 +356,8 @@ public class PlaybackService extends Service {
         updateNotification();
         broadcastStateChanged();
 
-        if (abandonFocus) {
-            abandonAudioFocus();
-        }
-        // If paused because of focus loss, we may resume on AUDIOFOCUS_GAIN (handled in listener).
-        if (!fromFocusLoss) {
-            resumeOnFocusGain = false;
-        }
+        if (abandonFocus) abandonAudioFocus();
+        if (!fromFocusLoss) resumeOnFocusGain = false;
     }
 
     private void ensurePreparedThenPlay() {
@@ -330,7 +391,7 @@ public class PlaybackService extends Service {
     }
 
     private boolean requestAudioFocus(AudioAttributes attrs) {
-        if (audioManager == null) return true; // fail-open (rare)
+        if (audioManager == null) return true;
 
         if (Build.VERSION.SDK_INT >= 26) {
             if (attrs == null) attrs = buildFocusAudioAttributesIfNeeded();
@@ -495,7 +556,7 @@ public class PlaybackService extends Service {
 
     private void broadcastStateChanged() {
         Intent i = new Intent(ACTION_STATE_CHANGED);
-        i.setPackage(getPackageName()); // keep it inside your app
+        i.setPackage(getPackageName());
         sendBroadcast(i);
     }
 }

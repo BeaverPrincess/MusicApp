@@ -33,6 +33,7 @@ import androidx.recyclerview.widget.RecyclerView;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import androidx.core.content.ContextCompat;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -153,11 +154,12 @@ public class MainActivity extends AppCompatActivity {
 
         // NEW: listen for service state updates (pause/play due to audio focus)
         IntentFilter f = new IntentFilter(PlaybackService.ACTION_STATE_CHANGED);
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(playbackStateReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(playbackStateReceiver, f);
-        }
+        ContextCompat.registerReceiver(
+                this,
+                playbackStateReceiver,
+                f,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+        );
 
         Intent i = new Intent(this, PlaybackService.class);
         startService(i);
