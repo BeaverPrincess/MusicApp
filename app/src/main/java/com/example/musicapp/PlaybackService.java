@@ -6,8 +6,10 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.Context;
 import android.database.Cursor;
 import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.net.Uri;
@@ -19,34 +21,66 @@ import android.provider.MediaStore;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
-import androidx.media.session.MediaButtonReceiver;
 import android.support.v4.media.session.MediaSessionCompat;
 
 import java.io.IOException;
 import java.util.ArrayList;
 
 public class PlaybackService extends Service {
-
     public static final String ACTION_TOGGLE = "com.example.musicapp.action.TOGGLE";
     public static final String ACTION_NEXT   = "com.example.musicapp.action.NEXT";
     public static final String ACTION_PREV   = "com.example.musicapp.action.PREV";
     public static final String ACTION_PLAY_SONG = "com.example.musicapp.action.PLAY_SONG";
-
+    // Broadcast to keep Activity UI in sync
+    public static final String ACTION_STATE_CHANGED = "com.example.musicapp.action.STATE_CHANGED";
     public static final String EXTRA_SONG_ID = "extra_song_id";
-
     private static final String CHANNEL_ID = "music_playback";
     private static final int NOTIF_ID = 42;
-
     private final IBinder binder = new LocalBinder();
-
     private MediaPlayer mediaPlayer;
     private boolean isPrepared = false;
-
     private final ArrayList<Song> queueSongs = new ArrayList<>();
     private final ArrayList<Song> librarySongs = new ArrayList<>();
     private int currentIndex = -1;
-
     private MediaSessionCompat mediaSession;
+    private AudioManager audioManager;
+    private AudioFocusRequest audioFocusRequest; // API 26+
+    private boolean resumeOnFocusGain = false;
+
+    private final AudioManager.OnAudioFocusChangeListener focusChangeListener = focusChange -> {
+        switch (focusChange) {
+            case AudioManager.AUDIOFOCUS_LOSS:
+                // Permanent loss: pause and don't auto-resume
+                if (isPlaying()) pauseInternal(true, false);
+                abandonAudioFocus();
+                resumeOnFocusGain = false;
+                break;
+
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                // Temporary loss: pause and remember we should resume
+                if (isPlaying()) {
+                    resumeOnFocusGain = true;
+                    pauseInternal(true, false);
+                }
+                break;
+
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                // Easiest/cleanest: pause instead of ducking
+                if (isPlaying()) {
+                    resumeOnFocusGain = true;
+                    pauseInternal(true, false);
+                }
+                break;
+
+            case AudioManager.AUDIOFOCUS_GAIN:
+                // Resume only if we paused due to transient focus loss
+                if (resumeOnFocusGain) {
+                    resumeOnFocusGain = false;
+                    ensurePreparedThenPlay();
+                }
+                break;
+        }
+    };
 
     public class LocalBinder extends Binder {
         public PlaybackService getService() { return PlaybackService.this; }
@@ -64,17 +98,22 @@ public class PlaybackService extends Service {
 
         createNotificationChannel();
 
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+
         mediaSession = new MediaSessionCompat(this, "PlaybackService");
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override public void onPlay() { ensurePreparedThenPlay(); }
-            @Override public void onPause() { pause(); }
+            @Override public void onPause() { pauseInternal(false, true); }
             @Override public void onSkipToNext() { playNext(); }
             @Override public void onSkipToPrevious() { playPrevious(); }
-            @Override public void onStop() { stopSelf(); }
+            @Override public void onStop() {
+                pauseInternal(false, true);
+                stopSelf();
+            }
         });
         mediaSession.setActive(true);
 
-        // Optional: load library here so Next/Prev works even if Activity never binds.
+        // load library here so Next/Prev works even if Activity never binds.
         loadLibraryNewestFirst();
     }
 
@@ -106,6 +145,7 @@ public class PlaybackService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        abandonAudioFocus();
         releasePlayer();
         if (mediaSession != null) {
             mediaSession.setActive(false);
@@ -122,12 +162,11 @@ public class PlaybackService extends Service {
         return queueSongs.isEmpty() ? null : queueSongs.get(0);
     }
 
-    // --------- Public API used by MainActivity (bound service) ---------
+    // --------- Public API used by MainActivity ---------
 
     public void setLibrarySongs(ArrayList<Song> songs) {
         librarySongs.clear();
         if (songs != null) librarySongs.addAll(songs);
-        // keep index sane if possible
         if (!queueSongs.isEmpty()) syncCurrentIndexToSong(queueSongs.get(0));
     }
 
@@ -136,6 +175,7 @@ public class PlaybackService extends Service {
         if (songs != null) queueSongs.addAll(songs);
         if (!queueSongs.isEmpty()) syncCurrentIndexToSong(queueSongs.get(0));
         updateNotification();
+        broadcastStateChanged();
     }
 
     public void playFromQueueHead(boolean autoPlay) {
@@ -149,7 +189,7 @@ public class PlaybackService extends Service {
 
     public void togglePlayPause() {
         if (mediaPlayer == null || !isPrepared) return;
-        if (mediaPlayer.isPlaying()) pause();
+        if (mediaPlayer.isPlaying()) pauseInternal(false, true);
         else ensurePreparedThenPlay();
     }
 
@@ -191,11 +231,14 @@ public class PlaybackService extends Service {
         mediaPlayer = new MediaPlayer();
         isPrepared = false;
 
+        AudioAttributes attrs = null;
+
         if (Build.VERSION.SDK_INT >= 21) {
-            mediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
+            attrs = new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build());
+                    .build();
+            mediaPlayer.setAudioAttributes(attrs);
         } else {
             mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
         }
@@ -207,14 +250,25 @@ public class PlaybackService extends Service {
             return;
         }
 
+        final AudioAttributes finalAttrs = attrs;
+
         mediaPlayer.setOnPreparedListener(mp -> {
             isPrepared = true;
-            if (autoPlay) mp.start();
-            updateNotification(); // shows correct play/pause icon
+
+            if (autoPlay) {
+                boolean focusGranted = requestAudioFocus(finalAttrs);
+                if (focusGranted) {
+                    mp.start();
+                } else {
+                    // Can't get focus: remain prepared but not playing
+                }
+            }
+
+            updateNotification();
+            broadcastStateChanged();
         });
 
         mediaPlayer.setOnCompletionListener(mp -> {
-            // Same behavior as your app: queue next if exists, otherwise continue in library
             if (queueSongs.size() > 1) {
                 queueSongs.remove(0);
                 Song next = queueSongs.get(0);
@@ -225,31 +279,92 @@ public class PlaybackService extends Service {
         });
 
         mediaPlayer.prepareAsync();
-
-        // Foreground service so playback + controls survive lockscreen/background
         updateNotification();
+        broadcastStateChanged();
     }
 
-    private void pause() {
+    private void pauseInternal(boolean fromFocusLoss, boolean abandonFocus) {
         if (mediaPlayer != null && isPrepared && mediaPlayer.isPlaying()) {
             mediaPlayer.pause();
-            updateNotification();
+        }
+        updateNotification();
+        broadcastStateChanged();
+
+        if (abandonFocus) {
+            abandonAudioFocus();
+        }
+        // If paused because of focus loss, we may resume on AUDIOFOCUS_GAIN (handled in listener).
+        if (!fromFocusLoss) {
+            resumeOnFocusGain = false;
         }
     }
 
     private void ensurePreparedThenPlay() {
-        if (mediaPlayer != null && isPrepared && !mediaPlayer.isPlaying()) {
-            mediaPlayer.start();
-            updateNotification();
-        }
+        if (mediaPlayer == null || !isPrepared) return;
+        if (mediaPlayer.isPlaying()) return;
+
+        boolean focusGranted = requestAudioFocus(buildFocusAudioAttributesIfNeeded());
+        if (!focusGranted) return;
+
+        mediaPlayer.start();
+        updateNotification();
+        broadcastStateChanged();
     }
 
     private void releasePlayer() {
         if (mediaPlayer != null) {
-            mediaPlayer.release();
+            try { mediaPlayer.release(); } catch (Exception ignored) {}
             mediaPlayer = null;
         }
         isPrepared = false;
+    }
+
+    // --------- Audio focus helpers ---------
+
+    private AudioAttributes buildFocusAudioAttributesIfNeeded() {
+        if (Build.VERSION.SDK_INT < 21) return null;
+        return new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build();
+    }
+
+    private boolean requestAudioFocus(AudioAttributes attrs) {
+        if (audioManager == null) return true; // fail-open (rare)
+
+        if (Build.VERSION.SDK_INT >= 26) {
+            if (attrs == null) attrs = buildFocusAudioAttributesIfNeeded();
+
+            audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setOnAudioFocusChangeListener(focusChangeListener)
+                    .setAudioAttributes(attrs)
+                    .setWillPauseWhenDucked(true)
+                    .build();
+
+            int res = audioManager.requestAudioFocus(audioFocusRequest);
+            return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+
+        } else {
+            int res = audioManager.requestAudioFocus(
+                    focusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+            );
+            return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+        }
+    }
+
+    private void abandonAudioFocus() {
+        if (audioManager == null) return;
+
+        if (Build.VERSION.SDK_INT >= 26) {
+            if (audioFocusRequest != null) {
+                audioManager.abandonAudioFocusRequest(audioFocusRequest);
+                audioFocusRequest = null;
+            }
+        } else {
+            audioManager.abandonAudioFocus(focusChangeListener);
+        }
     }
 
     // --------- Queue/library helpers ---------
@@ -259,6 +374,7 @@ public class PlaybackService extends Service {
         queueSongs.add(s);
         syncCurrentIndexToSong(s);
         updateNotification();
+        broadcastStateChanged();
     }
 
     private void syncCurrentIndexToSong(Song s) {
@@ -295,11 +411,11 @@ public class PlaybackService extends Service {
         PendingIntent nextPi = actionPi(ACTION_NEXT, 3);
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_launcher_foreground) // you can replace with a music icon
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(title)
                 .setContentText(playing ? "Playing" : "Paused")
                 .setContentIntent(contentPi)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC) // <-- shows on lock screen
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(playing)
                 .addAction(android.R.drawable.ic_media_previous, "Prev", prevPi)
                 .addAction(playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
@@ -310,8 +426,6 @@ public class PlaybackService extends Service {
                         .setShowActionsInCompactView(0, 1, 2));
 
         Notification notif = b.build();
-
-        // Start or update foreground
         startForeground(NOTIF_ID, notif);
     }
 
@@ -335,7 +449,7 @@ public class PlaybackService extends Service {
         if (nm != null) nm.createNotificationChannel(ch);
     }
 
-    // --------- Library load fallback (optional but useful) ---------
+    // --------- Library load fallback ---------
 
     private void loadLibraryNewestFirst() {
         librarySongs.clear();
@@ -375,5 +489,13 @@ public class PlaybackService extends Service {
                 librarySongs.add(new Song(id, name, uri, dateAddedMillis));
             } while (cursor.moveToNext());
         } catch (Exception ignored) {}
+    }
+
+    // --------- Broadcast to Activity ---------
+
+    private void broadcastStateChanged() {
+        Intent i = new Intent(ACTION_STATE_CHANGED);
+        i.setPackage(getPackageName()); // keep it inside your app
+        sendBroadcast(i);
     }
 }
